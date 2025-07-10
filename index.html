@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Just De Pic JS</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Favicon -->
+    <link rel="icon" href="data:,">
+  </head>
+  <body class="bg-muted min-h-screen flex flex-col">
+    <!-- Main Content -->
+    <main class="flex-1 flex flex-col items-center justify-center px-4 py-8">
+      <!-- File Input / Dropzone -->
+      <section id="dropzone" class="w-full max-w-xl border-2 border-dashed border-muted-foreground rounded-lg p-8 flex flex-col items-center justify-center gap-4 bg-background shadow-sm cursor-pointer transition hover:border-primary">
+        <svg class="w-12 h-12 text-muted-foreground" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 16V4m0 0l-4 4m4-4l4 4" />
+          <rect x="4" y="16" width="16" height="4" rx="2" class="fill-none" stroke="currentColor" />
+        </svg>
+        <p class="text-muted-foreground text-center">Drag & drop image(s) here, or <label for="file-input" class="text-primary underline cursor-pointer">browse</label></p>
+        <input id="file-input" type="file" accept="image/*" multiple class="hidden" />
+      </section>
+      <!-- Single Image Mode Placeholder -->
+      <section id="single-image-mode" class="hidden w-full max-w-2xl mt-8"></section>
+      <!-- Batch Mode Placeholder -->
+      <section id="batch-mode" class="hidden w-full max-w-5xl mt-8"></section>
+    </main>
+    <!-- Toasts/Notifications -->
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2"></div>
+    <!-- JS -->
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/exifr/dist/full.umd.js"></script>
+    <script>
+      document.addEventListener('DOMContentLoaded', function() {
+        // --- Utility: Toast Notification ---
+        function showToast(message, type = 'info') {
+          const toast = document.createElement('div');
+          toast.className = `px-4 py-2 rounded shadow bg-background border text-foreground font-medium animate-fade-in-up ${type === 'error' ? 'border-destructive text-destructive' : 'border-primary/30'}`;
+          toast.textContent = message;
+          document.getElementById('toast-container').appendChild(toast);
+          setTimeout(() => toast.remove(), 3500);
+        }
+
+        // --- DOM Elements ---
+        const dropzone = document.getElementById('dropzone');
+        const fileInput = document.getElementById('file-input');
+        const singleImageSection = document.getElementById('single-image-mode');
+        let currentImageFile = null;
+        let currentMetadata = {};
+        let currentImageDataURL = '';
+        const batchModeSection = document.getElementById('batch-mode');
+        let batchFiles = [];
+        let batchThumbURLs = [];
+        let batchSelected = new Set();
+        let batchInSidebarMode = false;
+        let batchSidebarSelectedIdx = null; // already declared
+        let batchSinglePanelState = null; // 'default' or index of selected image
+
+        // --- Enhanced Error Handling ---
+        function isSupportedImageType(file) {
+          return file.type.startsWith('image/jpeg') || file.type.startsWith('image/png');
+        }
+        function isFileTooLarge(file) {
+          return file.size > 15 * 1024 * 1024;
+        }
+
+        // --- Drag & Drop + File Input ---
+        dropzone.addEventListener('click', () => fileInput.click());
+        dropzone.addEventListener('dragover', e => {
+          e.preventDefault();
+          dropzone.classList.add('border-primary');
+        });
+        dropzone.addEventListener('dragleave', e => {
+          e.preventDefault();
+          dropzone.classList.remove('border-primary');
+        });
+        dropzone.addEventListener('drop', e => {
+          e.preventDefault();
+          dropzone.classList.remove('border-primary');
+          handleFiles(e.dataTransfer.files);
+        });
+        fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+        // Update handleFiles to check all files upfront
+        function handleFiles(files) {
+          if (!files.length) return;
+          for (const file of files) {
+            if (!isSupportedImageType(file)) {
+              showToast(`Unsupported file type: ${file.name}`, 'error');
+              return;
+            }
+            if (isFileTooLarge(file)) {
+              showToast(`File too large (max 15MB): ${file.name}`, 'error');
+              return;
+            }
+          }
+          if (files.length === 1) {
+            enterSingleImageMode(files[0]);
+          } else {
+            enterBatchMode(Array.from(files));
+          }
+        }
+
+        // --- Batch Mode ---
+        function enterBatchMode(files) {
+          batchFiles = files;
+          batchThumbURLs.forEach(url => URL.revokeObjectURL(url));
+          batchThumbURLs = files.map(f => URL.createObjectURL(f));
+          batchSelected = new Set(files.map((_, i) => i)); // all selected by default
+          batchInSidebarMode = false;
+          batchSidebarSelectedIdx = null;
+          renderBatchGrid(true, null); // Always use sidebar+divider layout
+          batchModeSection.classList.remove('hidden');
+          dropzone.classList.add('hidden');
+          singleImageSection.classList.add('hidden');
+        }
+
+        function renderBatchGrid(sidebarMode = true, sidebarSelectedIdx = null) {
+          batchSidebarSelectedIdx = sidebarSelectedIdx;
+          batchSinglePanelState = sidebarSelectedIdx === null ? 'default' : sidebarSelectedIdx;
+          batchModeSection.innerHTML = `
+            <div class='flex flex-row h-[80vh] w-full max-w-5xl rounded-lg shadow bg-card overflow-hidden border border-border'>
+              <!-- Sidebar: Thumbnails -->
+              <div id='batch-sidebar' class='bg-muted border-r border-border w-56 min-w-40 max-w-xs flex-shrink-0 overflow-y-auto flex flex-col gap-2 p-2'>
+                <div class='font-semibold text-lg mb-2 px-2 pt-1 text-muted-foreground'>Batch</div>
+                <div class='flex-1 flex flex-col gap-2'>
+                  ${batchFiles.map((file, i) => `
+                    <div class='relative group rounded-lg overflow-hidden border border-border bg-background shadow-sm hover:shadow-lg transition cursor-pointer ${i === sidebarSelectedIdx ? 'ring-2 ring-primary' : ''}'>
+                      <img src='${batchThumbURLs[i]}' alt='${file.name}' class='w-full h-20 object-cover'/>
+                      <input type='checkbox' class='absolute top-2 left-2 w-5 h-5 accent-primary bg-background border rounded shadow' data-idx='${i}' ${batchSelected.has(i) ? 'checked' : ''} />
+                      <div class='absolute inset-0' data-thumb='${i}' style='cursor:pointer'></div>
+                      <div class='absolute bottom-0 left-0 right-0 bg-black/60 text-white text-xs px-2 py-1 truncate'>${file.name}</div>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+              <!-- Divider -->
+              <div id='batch-divider' class='w-2 cursor-col-resize bg-border hover:bg-primary transition' style='user-select:none'></div>
+              <!-- Main Panel -->
+              <div class='flex-1 flex flex-col items-center justify-center min-w-0 relative'>
+                <div id='batch-single-panel' class='w-full h-full flex items-center justify-center'></div>
+              </div>
+            </div>
+          `;
+          // Sidebar event bindings
+          batchModeSection.querySelectorAll('input[type=checkbox]').forEach(cb => {
+            cb.addEventListener('change', e => {
+              const idx = Number(cb.dataset.idx);
+              if (cb.checked) batchSelected.add(idx); else batchSelected.delete(idx);
+              renderBatchGrid(true, batchSidebarSelectedIdx);
+            });
+          });
+          batchModeSection.querySelectorAll('[data-thumb]').forEach(div => {
+            div.addEventListener('click', async e => {
+              const idx = Number(div.dataset.thumb);
+              await renderBatchGrid(true, idx);
+              await renderBatchSinglePanel(idx);
+            });
+          });
+          // Render right panel content
+          if (batchSidebarSelectedIdx === null) {
+            // Default batch action view
+            const panel = batchModeSection.querySelector('#batch-single-panel');
+            panel.innerHTML = `
+              <div class='flex flex-col items-center justify-center w-full h-full'>
+                <button id='batch-remove-meta' class='bg-black text-white hover:bg-primary focus:ring-2 focus:ring-primary/50 px-6 py-3 rounded-lg font-semibold text-base shadow transition disabled:opacity-50' style='margin-bottom:1.5rem' ${batchSelected.size === 0 ? 'disabled' : ''}>Remove Metadata from Selected</button>
+                <button id='batch-back' class='mt-2 text-muted-foreground hover:text-primary underline font-medium text-base bg-transparent border-none shadow-none px-0 py-0 transition'>Back</button>
+              </div>
+            `;
+            batchModeSection.querySelector('#batch-remove-meta').onclick = batchRemoveMetadata;
+            batchModeSection.querySelector('#batch-back').onclick = () => {
+              batchModeSection.classList.add('hidden');
+              dropzone.classList.remove('hidden');
+              batchFiles = [];
+              batchThumbURLs.forEach(url => URL.revokeObjectURL(url));
+              batchThumbURLs = [];
+              batchSelected.clear();
+              batchInSidebarMode = false;
+              batchSidebarSelectedIdx = null;
+            };
+          } else {
+            renderBatchSinglePanel(batchSidebarSelectedIdx);
+          }
+          // --- Resizable Divider Handler ---
+          const sidebar = batchModeSection.querySelector('#batch-sidebar');
+          const divider = batchModeSection.querySelector('#batch-divider');
+          let isResizing = false;
+          let startX = 0;
+          let startWidth = 0;
+          divider.addEventListener('mousedown', (e) => {
+            isResizing = true;
+            startX = e.clientX;
+            startWidth = sidebar.offsetWidth;
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+          });
+          document.addEventListener('mousemove', (e) => {
+            if (!isResizing) return;
+            let newWidth = Math.max(120, Math.min(320, startWidth + (e.clientX - startX)));
+            sidebar.style.width = newWidth + 'px';
+          });
+          document.addEventListener('mouseup', () => {
+            if (isResizing) {
+              isResizing = false;
+              document.body.style.cursor = '';
+              document.body.style.userSelect = '';
+            }
+          });
+        }
+
+        async function renderBatchSinglePanel(idx) {
+          const file = batchFiles[idx];
+          const panel = batchModeSection.querySelector('#batch-single-panel');
+          panel.innerHTML = renderLoadingCard();
+          try {
+            const dataURL = await fileToDataURL(file);
+            let meta;
+            try {
+              meta = await exifr.parse(file, {iptc:true, xmp:true, userComment:true, tiff:true, exif:true, mergeOutput:true});
+            } catch (err) {
+              showToast('Failed to read image metadata.', 'error');
+              meta = {};
+            }
+            // Render the single image card, but with a custom back button
+            panel.innerHTML = `
+              <div class="flex flex-col items-center w-full">
+                <button id="batch-single-back" class="mb-4 text-muted-foreground hover:text-primary font-medium text-base bg-transparent border-none shadow-none px-0 py-0 transition self-start flex items-center gap-2" aria-label="Back">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" /></svg>
+                  <span class="sr-only">Back</span>
+                </button>
+                ${renderSingleImageCard(dataURL, meta, file.name)}
+              </div>
+            `;
+            // Bind form actions for this image
+            const form = panel.querySelector('#metadata-form');
+            if (form) {
+              form.onsubmit = e => e.preventDefault();
+              panel.querySelector('#save-meta').onclick = async () => {
+                // Save logic for this file
+                const formData = new FormData(form);
+                let exifObj = {};
+                for (const [key, value] of formData.entries()) {
+                  if (key === 'filename') continue;
+                  if (value) exifObj[key] = value;
+                }
+                try {
+                  let binary = await fileToArrayBuffer(file);
+                  let exifBytes = piexifjs.dump({
+                    '0th': piexifjs.load(binary)['0th'],
+                    'Exif': piexifjs.load(binary)['Exif'],
+                    'GPS': piexifjs.load(binary)['GPS'],
+                    '1st': piexifjs.load(binary)['1st'],
+                    'thumbnail': null
+                  });
+                  for (const k in exifObj) {
+                    if (piexifjs.TagValues.ExifIFD[k]) {
+                      piexifjs.load(binary)['Exif'][piexifjs.TagValues.ExifIFD[k]] = exifObj[k];
+                    } else if (piexifjs.TagValues.ImageIFD[k]) {
+                      piexifjs.load(binary)['0th'][piexifjs.TagValues.ImageIFD[k]] = exifObj[k];
+                    }
+                  }
+                  const newExif = piexifjs.dump(piexifjs.load(binary));
+                  const newDataURL = piexifjs.insert(newExif, dataURL);
+                  downloadImage(newDataURL, formData.get('filename'));
+                  showToast('Image saved with updated metadata!', 'info');
+                } catch (err) {
+                  showToast('Failed to save metadata. Only EXIF fields are supported for writing.', 'error');
+                }
+              };
+              panel.querySelector('#remove-meta').onclick = async () => {
+                try {
+                  const stripped = piexifjs.remove(dataURL);
+                  downloadImage(stripped, file.name.replace(/(\.[^.]+)$/, '_stripped$1'));
+                  showToast('All metadata removed!', 'info');
+                } catch (err) {
+                  showToast('Failed to remove metadata.', 'error');
+                }
+              };
+              panel.querySelector('#back-to-upload').onclick = () => {
+                renderBatchGrid(true, null);
+              };
+            }
+            // Custom back button (above the card)
+            panel.querySelector('#batch-single-back').onclick = () => {
+              renderBatchGrid(true, null);
+            };
+          } catch (err) {
+            panel.innerHTML = '<div class="text-destructive">Failed to load image.</div>';
+          }
+        }
+
+        // --- Single-Image Mode ---
+        async function enterSingleImageMode(file) {
+          if (!isSupportedImageType(file)) {
+            showToast('Unsupported file type.', 'error');
+            return;
+          }
+          if (isFileTooLarge(file)) {
+            showToast('File too large (max 15MB).', 'error');
+            return;
+          }
+          currentImageFile = file;
+          singleImageSection.innerHTML = renderLoadingCard();
+          singleImageSection.classList.remove('hidden');
+          dropzone.classList.add('hidden');
+          try {
+            const dataURL = await fileToDataURL(file);
+            currentImageDataURL = dataURL;
+            let meta;
+            try {
+              meta = await exifr.parse(file, {iptc:true, xmp:true, userComment:true, tiff:true, exif:true, mergeOutput:true});
+            } catch (err) {
+              showToast('Failed to read image metadata.', 'error');
+              meta = {};
+            }
+            currentMetadata = meta || {};
+            singleImageSection.innerHTML = renderSingleImageCard(dataURL, meta, file.name);
+            bindSingleImageForm();
+          } catch (err) {
+            showToast('Failed to load image.', 'error');
+            singleImageSection.innerHTML = '';
+            dropzone.classList.remove('hidden');
+          }
+        }
+
+        // Update enterSingleImageMode for error handling
+        async function enterSingleImageMode(file, fromBatch = false, batchIdx = null, sidebarMode = false) {
+          if (!isSupportedImageType(file)) {
+            showToast('Unsupported file type.', 'error');
+            return;
+          }
+          if (isFileTooLarge(file)) {
+            showToast('File too large (max 15MB).', 'error');
+            return;
+          }
+          currentImageFile = file;
+          singleImageSection.innerHTML = renderLoadingCard();
+          singleImageSection.classList.remove('hidden');
+          dropzone.classList.add('hidden');
+          try {
+            const dataURL = await fileToDataURL(file);
+            currentImageDataURL = dataURL;
+            let meta;
+            try {
+              meta = await exifr.parse(file, {iptc:true, xmp:true, userComment:true, tiff:true, exif:true, mergeOutput:true});
+            } catch (err) {
+              showToast('Failed to read image metadata.', 'error');
+              meta = {};
+            }
+            currentMetadata = meta || {};
+            singleImageSection.innerHTML = renderSingleImageCard(dataURL, meta, file.name);
+            bindSingleImageForm();
+          } catch (err) {
+            showToast('Failed to load image.', 'error');
+            singleImageSection.innerHTML = '';
+            dropzone.classList.remove('hidden');
+          }
+          if (fromBatch && sidebarMode) {
+            // Render in the right panel of the batch sidebar
+            const batchSinglePanel = document.getElementById('batch-single-panel');
+            if (batchSinglePanel) {
+              batchSinglePanel.innerHTML = singleImageSection.innerHTML;
+              singleImageSection.classList.add('hidden');
+            }
+          } else if (fromBatch) {
+            const backBtn = document.createElement('button');
+            backBtn.textContent = 'Back to Batch';
+            backBtn.className = 'bg-muted text-muted-foreground hover:bg-muted/80 px-4 py-2 rounded font-medium transition mb-4';
+            backBtn.onclick = () => {
+              singleImageSection.classList.add('hidden');
+              batchModeSection.classList.remove('hidden');
+            };
+            singleImageSection.prepend(backBtn);
+          }
+        }
+
+        function fileToDataURL(file) {
+          return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+        }
+
+        function renderLoadingCard() {
+          return `<div class="w-full flex flex-col items-center justify-center p-8 bg-card rounded-lg shadow animate-pulse">
+            <div class="h-48 w-48 bg-muted rounded mb-4"></div>
+            <div class="h-6 w-1/2 bg-muted rounded mb-2"></div>
+            <div class="h-4 w-1/3 bg-muted rounded"></div>
+          </div>`;
+        }
+
+        function renderSingleImageCard(dataURL, meta, filename) {
+          // Dynamically show all metadata fields
+          const fields = [
+            {label: 'File Name', key: 'filename', value: filename, readonly: true}
+          ];
+          if (meta && typeof meta === 'object') {
+            for (const [key, value] of Object.entries(meta)) {
+              if (key === 'filename') continue;
+              if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+                fields.push({label: key, key, value});
+              } else {
+                fields.push({label: key, key, value: JSON.stringify(value, null, 2), readonly: true, isJson: true});
+              }
+            }
+          }
+          return `
+          <div class="flex justify-center items-center w-full">
+            <div class="bg-card rounded-lg shadow p-6 flex flex-col gap-6 resize overflow-auto min-w-[320px] min-h-[320px] max-w-[90vw] max-h-[90vh] w-[600px] h-[600px] sm:w-[600px] sm:h-[600px] w-full h-auto">
+              <div class="flex flex-col sm:flex-row gap-6 items-start">
+                <img src="${dataURL}" alt="Image preview" class="w-48 h-48 object-contain rounded border bg-muted" />
+                <form id="metadata-form" class="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[60vh] overflow-y-auto pr-2">
+                  ${fields.map(f => f.isJson
+                    ? `<div class='flex flex-col gap-1 col-span-2'><label class='text-sm font-medium text-muted-foreground'>${f.label}</label><textarea readonly class='input-disabled border rounded px-3 py-2 bg-muted text-foreground text-xs h-20'>${f.value}</textarea></div>`
+                    : `<div class='flex flex-col gap-1'><label class='text-sm font-medium text-muted-foreground'>${f.label}</label><input name='${f.key}' value='${f.value || ''}' ${f.readonly ? 'readonly class="input-disabled"' : ''} class='input border rounded px-3 py-2 bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 transition' /></div>`
+                  ).join('')}
+                </form>
+              </div>
+              <div class="flex gap-2 justify-end">
+                <button id="remove-meta" class="bg-destructive text-destructive-foreground hover:bg-destructive/90 px-4 py-2 rounded font-medium transition">Remove All Metadata</button>
+                <button id="save-meta" class="bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded font-medium transition">Save</button>
+                <button id="back-to-upload" class="bg-muted text-muted-foreground hover:bg-muted/80 px-4 py-2 rounded font-medium transition">Back</button>
+              </div>
+            </div>
+          </div>
+          `;
+        }
+
+        function bindSingleImageForm() {
+          document.getElementById('save-meta').onclick = saveEditedImage;
+          document.getElementById('remove-meta').onclick = removeAllMetadata;
+          document.getElementById('back-to-upload').onclick = () => {
+            singleImageSection.classList.add('hidden');
+            dropzone.classList.remove('hidden');
+            currentImageFile = null;
+            currentMetadata = {};
+          };
+        }
+
+        async function saveEditedImage() {
+          const form = document.getElementById('metadata-form');
+          const formData = new FormData(form);
+          // Update EXIF fields
+          let exifObj = {};
+          for (const [key, value] of formData.entries()) {
+            if (key === 'filename') continue;
+            if (value) exifObj[key] = value;
+          }
+          try {
+            // Only EXIF can be written with piexifjs
+            let binary = await fileToArrayBuffer(currentImageFile);
+            let exifBytes = piexifjs.dump({
+              '0th': piexifjs.load(binary)['0th'],
+              'Exif': piexifjs.load(binary)['Exif'],
+              'GPS': piexifjs.load(binary)['GPS'],
+              '1st': piexifjs.load(binary)['1st'],
+              'thumbnail': null
+            });
+            // Update fields
+            for (const k in exifObj) {
+              if (piexifjs.TagValues.ExifIFD[k]) {
+                piexifjs.load(binary)['Exif'][piexifjs.TagValues.ExifIFD[k]] = exifObj[k];
+              } else if (piexifjs.TagValues.ImageIFD[k]) {
+                piexifjs.load(binary)['0th'][piexifjs.TagValues.ImageIFD[k]] = exifObj[k];
+              }
+            }
+            const newExif = piexifjs.dump(piexifjs.load(binary));
+            const newDataURL = piexifjs.insert(newExif, currentImageDataURL);
+            downloadImage(newDataURL, formData.get('filename'));
+            showToast('Image saved with updated metadata!', 'info');
+          } catch (err) {
+            showToast('Failed to save metadata. Only EXIF fields are supported for writing.', 'error');
+          }
+        }
+
+        async function removeAllMetadata() {
+          try {
+            const stripped = piexifjs.remove(currentImageDataURL);
+            downloadImage(stripped, currentImageFile.name.replace(/(\.[^.]+)$/, '_stripped$1'));
+            showToast('All metadata removed!', 'info');
+          } catch (err) {
+            showToast('Failed to remove metadata.', 'error');
+          }
+        }
+
+        function downloadImage(dataURL, filename) {
+          const a = document.createElement('a');
+          a.href = dataURL;
+          a.download = filename || 'image.jpg';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        }
+
+        function fileToArrayBuffer(file) {
+          return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsArrayBuffer(file);
+          });
+        }
+
+        // --- Batch Remove Metadata ---
+        async function batchRemoveMetadata() {
+          const selectedFiles = Array.from(batchSelected).map(i => batchFiles[i]);
+          if (!selectedFiles.length) return;
+          if (selectedFiles.length === 1) {
+            await enterSingleImageMode(selectedFiles[0]);
+            showToast('Open the image to remove metadata.');
+            return;
+          }
+          const zip = new JSZip();
+          let count = 0;
+          for (const [i, file] of selectedFiles.entries()) {
+            if (!isSupportedImageType(file)) {
+              showToast(`Unsupported file type: ${file.name}`, 'error');
+              continue;
+            }
+            if (isFileTooLarge(file)) {
+              showToast(`File too large (max 15MB): ${file.name}`, 'error');
+              continue;
+            }
+            try {
+              const dataURL = await fileToDataURL(file);
+              const stripped = piexifjs.remove(dataURL);
+              const base = file.name.replace(/(\.[^.]+)$/, '_stripped$1');
+              zip.file(base, stripped.split(',')[1], {base64: true});
+              count++;
+            } catch (err) {
+              showToast(`Failed to strip: ${file.name}`, 'error');
+            }
+          }
+          if (count) {
+            zip.generateAsync({type:'blob'}).then(blob => {
+              const a = document.createElement('a');
+              a.href = URL.createObjectURL(blob);
+              a.download = 'stripped_images.zip';
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              showToast('Downloaded ZIP of stripped images!', 'info');
+            });
+          }
+        }
+      }); // END DOMContentLoaded
+    </script>
+  </body>
+</html> 
