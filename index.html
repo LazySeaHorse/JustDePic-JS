@@ -19,7 +19,7 @@
           <rect x="4" y="16" width="16" height="4" rx="2" class="fill-none" stroke="currentColor" />
         </svg>
         <p class="text-muted-foreground text-center">Drag & drop image(s) here, or <label for="file-input" class="text-primary underline cursor-pointer">browse</label></p>
-        <input id="file-input" type="file" accept="image/*" multiple class="hidden" />
+        <input id="file-input" type="file" accept="image/jpeg,image/png,image/heic,image/webp" multiple class="hidden" />
       </section>
       <!-- Single Image Mode Placeholder -->
       <section id="single-image-mode" class="hidden w-full max-w-2xl mt-8"></section>
@@ -33,6 +33,12 @@
     <script src="https://cdn.jsdelivr.net/npm/piexifjs@1.0.6/piexif.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/exifr/dist/full.umd.js"></script>
     <script>
+      window.addEventListener('error', function(event) {
+        console.error('Global error:', event.error || event.message);
+      });
+      window.addEventListener('unhandledrejection', function(event) {
+        console.error('Unhandled promise rejection:', event.reason);
+      });
       document.addEventListener('DOMContentLoaded', function() {
         // --- Utility: Toast Notification ---
         function showToast(message, type = 'info') {
@@ -60,7 +66,13 @@
 
         // --- Enhanced Error Handling ---
         function isSupportedImageType(file) {
-          return file.type.startsWith('image/jpeg') || file.type.startsWith('image/png');
+          // Accept JPG, JPEG, PNG, HEIC, WEBP
+          return (
+            file.type === 'image/jpeg' ||
+            file.type === 'image/png' ||
+            file.type === 'image/heic' ||
+            file.type === 'image/webp'
+          );
         }
         function isFileTooLarge(file) {
           return file.size > 15 * 1024 * 1024;
@@ -247,22 +259,22 @@
                 }
                 try {
                   let binary = await fileToArrayBuffer(file);
-                  let exifBytes = piexifjs.dump({
-                    '0th': piexifjs.load(binary)['0th'],
-                    'Exif': piexifjs.load(binary)['Exif'],
-                    'GPS': piexifjs.load(binary)['GPS'],
-                    '1st': piexifjs.load(binary)['1st'],
+                  let exifBytes = piexif.dump({
+                    '0th': piexif.load(binary)['0th'],
+                    'Exif': piexif.load(binary)['Exif'],
+                    'GPS': piexif.load(binary)['GPS'],
+                    '1st': piexif.load(binary)['1st'],
                     'thumbnail': null
                   });
                   for (const k in exifObj) {
-                    if (piexifjs.TagValues.ExifIFD[k]) {
-                      piexifjs.load(binary)['Exif'][piexifjs.TagValues.ExifIFD[k]] = exifObj[k];
-                    } else if (piexifjs.TagValues.ImageIFD[k]) {
-                      piexifjs.load(binary)['0th'][piexifjs.TagValues.ImageIFD[k]] = exifObj[k];
+                    if (piexif.TagValues.ExifIFD[k]) {
+                      piexif.load(binary)['Exif'][piexif.TagValues.ExifIFD[k]] = exifObj[k];
+                    } else if (piexif.TagValues.ImageIFD[k]) {
+                      piexif.load(binary)['0th'][piexif.TagValues.ImageIFD[k]] = exifObj[k];
                     }
                   }
-                  const newExif = piexifjs.dump(piexifjs.load(binary));
-                  const newDataURL = piexifjs.insert(newExif, dataURL);
+                  const newExif = piexif.dump(piexif.load(binary));
+                  const newDataURL = piexif.insert(newExif, dataURL);
                   downloadImage(newDataURL, formData.get('filename'));
                   showToast('Image saved with updated metadata!', 'info');
                 } catch (err) {
@@ -271,7 +283,7 @@
               };
               panel.querySelector('#remove-meta').onclick = async () => {
                 try {
-                  const stripped = piexifjs.remove(dataURL);
+                  const stripped = piexif.remove(dataURL);
                   downloadImage(stripped, file.name.replace(/(\.[^.]+)$/, '_stripped$1'));
                   showToast('All metadata removed!', 'info');
                 } catch (err) {
@@ -408,9 +420,14 @@
               }
             }
           }
+          let warning = '';
+          if (!['image/jpeg', 'image/jpg'].includes(currentImageFile.type)) {
+            warning = `<div class='text-warning text-sm mb-2'>Editing/removal of metadata is limited for this format. Only JPEG EXIF can be fully edited/removed in-browser.</div>`;
+          }
           return `
           <div class="flex justify-center items-center w-full">
             <div class="bg-card rounded-lg shadow p-6 flex flex-col gap-6 resize overflow-auto min-w-[320px] min-h-[320px] max-w-[90vw] max-h-[90vh] w-[600px] h-[600px] sm:w-[600px] sm:h-[600px] w-full h-auto">
+              ${warning}
               <div class="flex flex-col sm:flex-row gap-6 items-start">
                 <img src="${dataURL}" alt="Image preview" class="w-48 h-48 object-contain rounded border bg-muted" />
                 <form id="metadata-form" class="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[60vh] overflow-y-auto pr-2">
@@ -453,23 +470,23 @@
           try {
             // Only EXIF can be written with piexifjs
             let binary = await fileToArrayBuffer(currentImageFile);
-            let exifBytes = piexifjs.dump({
-              '0th': piexifjs.load(binary)['0th'],
-              'Exif': piexifjs.load(binary)['Exif'],
-              'GPS': piexifjs.load(binary)['GPS'],
-              '1st': piexifjs.load(binary)['1st'],
+            let exifBytes = piexif.dump({
+              '0th': piexif.load(binary)['0th'],
+              'Exif': piexif.load(binary)['Exif'],
+              'GPS': piexif.load(binary)['GPS'],
+              '1st': piexif.load(binary)['1st'],
               'thumbnail': null
             });
             // Update fields
             for (const k in exifObj) {
-              if (piexifjs.TagValues.ExifIFD[k]) {
-                piexifjs.load(binary)['Exif'][piexifjs.TagValues.ExifIFD[k]] = exifObj[k];
-              } else if (piexifjs.TagValues.ImageIFD[k]) {
-                piexifjs.load(binary)['0th'][piexifjs.TagValues.ImageIFD[k]] = exifObj[k];
+              if (piexif.TagValues.ExifIFD[k]) {
+                piexif.load(binary)['Exif'][piexif.TagValues.ExifIFD[k]] = exifObj[k];
+              } else if (piexif.TagValues.ImageIFD[k]) {
+                piexif.load(binary)['0th'][piexif.TagValues.ImageIFD[k]] = exifObj[k];
               }
             }
-            const newExif = piexifjs.dump(piexifjs.load(binary));
-            const newDataURL = piexifjs.insert(newExif, currentImageDataURL);
+            const newExif = piexif.dump(piexif.load(binary));
+            const newDataURL = piexif.insert(newExif, currentImageDataURL);
             downloadImage(newDataURL, formData.get('filename'));
             showToast('Image saved with updated metadata!', 'info');
           } catch (err) {
@@ -477,11 +494,25 @@
           }
         }
 
+        // --- Remove All Metadata (updated for PNG, WEBP, HEIC) ---
         async function removeAllMetadata() {
           try {
-            const stripped = piexifjs.remove(currentImageDataURL);
+            const type = currentImageFile.type;
+            let stripped;
+            if (type === 'image/jpeg') {
+              stripped = piexif.remove(currentImageDataURL);
+              showToast('EXIF metadata removed! IPTC/XMP may remain.', 'info');
+            } else if (type === 'image/png') {
+              stripped = await removePngMetadata(currentImageFile);
+              showToast('All PNG textual metadata removed!', 'info');
+            } else if (type === 'image/webp' || type === 'image/heic') {
+              showToast('Metadata removal for this format is limited in-browser.', 'error');
+              stripped = currentImageDataURL;
+            } else {
+              showToast('Unsupported file type for metadata removal.', 'error');
+              return;
+            }
             downloadImage(stripped, currentImageFile.name.replace(/(\.[^.]+)$/, '_stripped$1'));
-            showToast('All metadata removed!', 'info');
           } catch (err) {
             showToast('Failed to remove metadata.', 'error');
           }
@@ -527,7 +558,7 @@
             }
             try {
               const dataURL = await fileToDataURL(file);
-              const stripped = piexifjs.remove(dataURL);
+              const stripped = piexif.remove(dataURL);
               const base = file.name.replace(/(\.[^.]+)$/, '_stripped$1');
               zip.file(base, stripped.split(',')[1], {base64: true});
               count++;
@@ -546,6 +577,41 @@
               showToast('Downloaded ZIP of stripped images!', 'info');
             });
           }
+        }
+
+        // --- PNG Metadata Removal Helper ---
+        async function removePngMetadata(file) {
+          // Read file as ArrayBuffer
+          const buffer = await fileToArrayBuffer(file);
+          // Parse PNG chunks
+          function getUint32(dataview, offset) {
+            return dataview.getUint32(offset, false);
+          }
+          const dv = new DataView(buffer);
+          let pos = 8; // skip PNG signature
+          const out = [new Uint8Array(buffer.slice(0, 8))];
+          while (pos < buffer.byteLength) {
+            const length = getUint32(dv, pos);
+            const type = String.fromCharCode.apply(null, new Uint8Array(buffer.slice(pos + 4, pos + 8)));
+            if (!['tEXt', 'iTXt', 'zTXt'].includes(type)) {
+              out.push(new Uint8Array(buffer.slice(pos, pos + 12 + length)));
+            }
+            pos += 12 + length;
+          }
+          // Reconstruct PNG
+          const newBuffer = new Uint8Array(out.reduce((acc, arr) => acc + arr.length, 0));
+          let offset = 0;
+          for (const arr of out) {
+            newBuffer.set(arr, offset);
+            offset += arr.length;
+          }
+          // Convert to DataURL
+          const blob = new Blob([newBuffer], {type: 'image/png'});
+          return await new Promise(res => {
+            const reader = new FileReader();
+            reader.onload = () => res(reader.result);
+            reader.readAsDataURL(blob);
+          });
         }
       }); // END DOMContentLoaded
     </script>
