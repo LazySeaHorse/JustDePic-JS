@@ -34,6 +34,12 @@ Check it out live on [GitHub Pages](https://lazyseahorse.github.io/JustDePic-JS/
 3. **Review and edit** metadata for each image, or process in batch.
 4. **Download** your cleaned images (or a ZIP for batch mode).
 
+## Limitations
+
+- Supported file formats: JPEG, PNG, HEIC, WEBP
+- You can only edit _some_ metadata
+- Only EXIF data is removed for JPEG files
+
 ## 🛠️ Tech Stack
 
 - **HTML + JavaScript** (no frameworks)
